@@ -12,9 +12,31 @@ else
 fi
 cd "${ROOT_DIR}"
 
-TAG="${1:-16.10.26}"
-BASE_IMAGE="shantanupatil01/overleaf-extended:base-${TAG}"
-MAIN_IMAGE="shantanupatil01/overleaf-extended:${TAG}"
+TARGET="all"
+TAG="16.10.26"
+
+case "${1:-}" in
+  base)
+    TARGET="base"
+    shift
+    ;;
+  main)
+    TARGET="main"
+    shift
+    ;;
+  all)
+    TARGET="all"
+    shift
+    ;;
+esac
+
+if [ -n "${1:-}" ]; then
+  TAG="$1"
+fi
+
+BASE_IMAGE_TAGGED="shantanupatil01/overleaf-extended:base-${TAG}"
+BASE_IMAGE_LATEST="shantanupatil01/overleaf-extended:base-latest"
+MAIN_IMAGE_TAGGED="shantanupatil01/overleaf-extended:${TAG}"
 MAIN_IMAGE_LATEST="shantanupatil01/overleaf-extended:latest"
 
 send_notification() {
@@ -67,102 +89,125 @@ setup_native_builder() {
   if [ -f "$HOME/.ssh/id_rsa" ]; then
     ssh-add "$HOME/.ssh/id_rsa" 2>/dev/null || true
   fi
-
-  local needs_remote=0
-  if [ "${RECONFIGURE_BUILDER:-0}" = "1" ]; then
-    needs_remote=1
-  elif ! docker buildx inspect "${builder}" >/dev/null 2>&1; then
-    needs_remote=1
-  elif ! docker buildx inspect "${builder}" 2>/dev/null | grep -q "remote-${missing_arch}"; then
-    needs_remote=1
-  elif docker buildx inspect "${builder}" 2>/dev/null | grep -A 4 "remote-${missing_arch}" | grep -q "Error:"; then
-    echo "⚠️ Remote node 'remote-${missing_arch}' is not responding."
-    needs_remote=1
+  if [ -f "$HOME/.ssh/id_ed25519" ]; then
+    ssh-add "$HOME/.ssh/id_ed25519" 2>/dev/null || true
   fi
 
-  if [ "${needs_remote}" -eq 1 ]; then
+  local needs_setup=0
+  if [ "${RECONFIGURE_BUILDER:-0}" = "1" ]; then
+    needs_setup=1
+  elif ! docker buildx inspect "${builder}" >/dev/null 2>&1; then
+    needs_setup=1
+  elif ! docker buildx inspect "${builder}" 2>/dev/null | grep -q "remote-${missing_arch}"; then
+    needs_setup=1
+  elif ! docker buildx inspect "${builder}" 2>/dev/null | grep -q 'network="host"'; then
+    needs_setup=1
+  fi
+
+  if [ "${needs_setup}" -eq 0 ]; then
+    docker buildx use "${builder}" 2>/dev/null || true
+    echo "🚀 Using existing healthy multi-node native builder '${builder}'"
+    return 0
+  fi
+
+  local remote_target=""
+  if [ -n "${REMOTE_BUILDER_IP:-}" ]; then
+    remote_target="${REMOTE_BUILDER_IP}"
+  else
     echo "=========================================================="
     echo "⚡ Multi-Node Native Builder Setup"
     echo "Current machine is [${local_arch}]."
     echo "To build multi-arch natively without slow QEMU emulation,"
     echo "we need a native [${missing_arch}] machine."
     echo "=========================================================="
-
-    local remote_input=""
-    if [ -n "${REMOTE_BUILDER_IP:-}" ]; then
-      remote_input="${REMOTE_BUILDER_IP}"
-    elif [ -e /dev/tty ]; then
-      read -r -p "Enter IP address or SSH host for native [${missing_arch}] machine (e.g. 192.168.1.50 or user@host): " remote_input < /dev/tty || true
+    if [ -e /dev/tty ]; then
+      read -r -p "Enter IP address or SSH user@host for native [${missing_arch}] machine: " remote_target < /dev/tty || true
+    else
+      read -r -p "Enter IP address or SSH user@host for native [${missing_arch}] machine: " remote_target || true
     fi
-
-    if [ -z "${remote_input}" ]; then
-      echo "⚠️ No remote host provided. Falling back to local builder (QEMU emulation will be used for ${missing_arch})."
-      return 0
-    fi
-
-    local ssh_target="${remote_input}"
-    if [[ "${ssh_target}" != *"@"* ]]; then
-      ssh_target="${USER}@${ssh_target}"
-    fi
-
-    # Automatically accept host key if new IP
-    ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes "${ssh_target}" true 2>/dev/null || true
-
-    echo "🔌 Testing Docker connection at ssh://${ssh_target}..."
-    if ! docker -H "ssh://${ssh_target}" info >/dev/null 2>&1; then
-      echo "❌ Could not connect to Docker at ssh://${ssh_target}."
-      echo "Make sure SSH key access and Docker are running on the remote machine."
-      echo "Falling back to local builder..."
-      return 0
-    fi
-
-    echo "🛠️ Configuring multi-node builder '${builder}'..."
-    docker buildx rm "${builder}" 2>/dev/null || true
-
-    docker buildx create --name "${builder}" \
-      --driver docker-container \
-      --platform "${local_platform}" \
-      --node "local-${local_arch}"
-
-    docker buildx create --name "${builder}" \
-      --append \
-      --driver docker-container \
-      --platform "${missing_platform}" \
-      --node "remote-${missing_arch}" \
-      "ssh://${ssh_target}"
-
-    echo "🔄 Bootstrapping builder..."
-    docker buildx inspect --bootstrap "${builder}" || true
   fi
 
+  if [ -z "${remote_target}" ]; then
+    echo "⚠️ No remote host provided. Falling back to local builder (QEMU emulation will be used for ${missing_arch})."
+    return 0
+  fi
+
+  if [[ "${remote_target}" != *"@"* ]]; then
+    remote_target="${USER}@${remote_target}"
+  fi
+
+  # Automatically accept host key if new IP
+  ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes "${remote_target}" true 2>/dev/null || true
+
+  echo "🔌 Testing Docker connection at ssh://${remote_target}..."
+  if ! docker -H "ssh://${remote_target}" info >/dev/null 2>&1; then
+    echo "❌ Could not connect to Docker at ssh://${remote_target}."
+    echo "Make sure SSH key access and Docker are running on the remote machine."
+    echo "Falling back to local builder..."
+    return 0
+  fi
+
+  echo "🛠️ Configuring multi-node builder '${builder}' with host networking..."
+  docker buildx rm "${builder}" 2>/dev/null || true
+
+  docker buildx create --name "${builder}" \
+    --driver docker-container \
+    --driver-opt network=host \
+    --platform "${local_platform}" \
+    --node "local-${local_arch}"
+
+  docker buildx create --name "${builder}" \
+    --append \
+    --driver docker-container \
+    --driver-opt network=host \
+    --platform "${missing_platform}" \
+    --node "remote-${missing_arch}" \
+    "ssh://${remote_target}"
+
+  echo "🔄 Bootstrapping builder..."
+  docker buildx inspect --bootstrap "${builder}" || true
   docker buildx use "${builder}" 2>/dev/null || true
   echo "🚀 Using multi-node native builder '${builder}'"
 }
 
 setup_native_builder
 
+BUILDER_FLAG=""
+if docker buildx inspect "multiarch-native" >/dev/null 2>&1; then
+  BUILDER_FLAG="--builder multiarch-native"
+fi
+
 # 1. Build OverLeaf-Base Image
-send_notification "🚀 Build started for ${BASE_IMAGE}"
-if docker buildx build --builder multiarch-native --platform linux/amd64,linux/arm64 \
-  -f ./server-ce/Dockerfile-base \
-  -t "${BASE_IMAGE}" \
-  --push .; then
-  send_notification "✅ Base build pushed successfully!"
+if [ "${TARGET}" = "base" ] || [ "${TARGET}" = "all" ]; then
+  send_notification "🚀 Build started for ${BASE_IMAGE_TAGGED}"
+  if docker buildx build ${BUILDER_FLAG} --platform linux/amd64,linux/arm64 \
+    -f ./server-ce/Dockerfile-base \
+    -t "${BASE_IMAGE_TAGGED}" \
+    -t "${BASE_IMAGE_LATEST}" \
+    --push .; then
+    send_notification "✅ Base build pushed successfully!"
+  else
+    send_notification "❌ Base build Failed!"
+    exit 1
+  fi
 else
-  send_notification "❌ Base build Failed!"
-  exit 1
+  echo "⏩ Skipping base image build (TARGET=${TARGET})"
 fi
 
 # 2. Build OverLeaf-Main Image
-send_notification "🚀 Build started for ${MAIN_IMAGE}"
-if docker buildx build --builder multiarch-native --platform linux/amd64,linux/arm64 \
-  -f ./server-ce/Dockerfile \
-  --build-arg OVERLEAF_BASE_TAG="${BASE_IMAGE}" \
-  -t "${MAIN_IMAGE_LATEST}" \
-  -t "${MAIN_IMAGE}" \
-  --push .; then
-  send_notification "✅ Main build pushed successfully!"
+if [ "${TARGET}" = "main" ] || [ "${TARGET}" = "all" ]; then
+  send_notification "🚀 Build started for ${MAIN_IMAGE_TAGGED}"
+  if docker buildx build ${BUILDER_FLAG} --platform linux/amd64,linux/arm64 \
+    -f ./server-ce/Dockerfile \
+    --build-arg OVERLEAF_BASE_TAG="${BASE_IMAGE_TAGGED}" \
+    -t "${MAIN_IMAGE_TAGGED}" \
+    -t "${MAIN_IMAGE_LATEST}" \
+    --push .; then
+    send_notification "✅ Main build pushed successfully!"
+  else
+    send_notification "❌ Main build Failed!"
+    exit 1
+  fi
 else
-  send_notification "❌ Main build Failed!"
-  exit 1
+  echo "⏩ Skipping main image build (TARGET=${TARGET})"
 fi

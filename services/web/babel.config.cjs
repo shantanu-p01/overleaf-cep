@@ -2,7 +2,7 @@ module.exports = {
   compact: false,
   presets: [
     [
-      '@babel/env',
+      require.resolve('@babel/preset-env'),
       {
         useBuiltIns: 'usage',
         // This version must be aligned with the `core-js` version in `package.json`
@@ -25,10 +25,10 @@ module.exports = {
         ],
       },
     ],
-    ['@babel/react', { runtime: 'automatic' }],
-    '@babel/typescript',
+    [require.resolve('@babel/preset-react'), { runtime: 'automatic' }],
+    require.resolve('@babel/preset-typescript'),
   ],
-  plugins: ['macros'],
+  plugins: [require.resolve('babel-plugin-macros')],
   overrides: [
     // treat .cjs files (e.g. libraries symlinked into node_modules) as commonjs
     { test: /\.cjs$/, sourceType: 'script' },

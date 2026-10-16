@@ -3,7 +3,7 @@
 # Overleaf Community Edition (overleaf/overleaf)
 # ---------------------------------------------
 
-ARG OVERLEAF_BASE_TAG=sharelatex/sharelatex-base:latest
+ARG OVERLEAF_BASE_TAG=shantanupatil01/overleaf-extended:base-latest
 FROM $OVERLEAF_BASE_TAG
 
 WORKDIR /overleaf
@@ -17,7 +17,7 @@ COPY server-ce/genScript.js server-ce/services.js /overleaf/
 # -------------------------------------------------------------------------
 # Corepack setup, shared between all the images.
 ENV COREPACK_HOME=/opt/corepack
-RUN corepack enable && (corepack install -g yarn@4.18.0 2>/dev/null || corepack prepare yarn@4.18.0 --activate)
+RUN corepack enable && corepack install -g yarn@4.18.0
 ENV COREPACK_ENABLE_NETWORK=0
 
 # Install yarn dependencies
