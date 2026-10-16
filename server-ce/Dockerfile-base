@@ -29,7 +29,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     &&  unattended-upgrade --verbose --no-minimal-upgrade-steps \
     # install Node.js https://github.com/nodesource/distributions#nodejs
     &&  mkdir -p /etc/apt/keyrings \
-    &&  curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+    &&  (curl -4 -fsSL --retry 5 --retry-delay 2 --retry-all-errors https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+        || curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x2f59b5f99b1be0b4") \
+        | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
     &&  echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_24.x nodistro main" | tee /etc/apt/sources.list.d/nodesource.list \
     &&  apt-get update \
     &&  apt-get install -y nodejs \
@@ -53,11 +55,21 @@ RUN mkdir /install-tl-unx \
     &&  wget --quiet https://tug.org/texlive/files/texlive.asc \
     &&  gpg --import texlive.asc \
     &&  rm texlive.asc \
-    &&  wget --quiet ${TEXLIVE_MIRROR}/install-tl-unx.tar.gz \
-    &&  wget --quiet ${TEXLIVE_MIRROR}/install-tl-unx.tar.gz.sha512 \
-    &&  wget --quiet ${TEXLIVE_MIRROR}/install-tl-unx.tar.gz.sha512.asc \
-    &&  gpg --verify install-tl-unx.tar.gz.sha512.asc \
-    &&  sha512sum -c install-tl-unx.tar.gz.sha512 \
+    &&  TEXLIVE_URL=$(curl -4 -fsSL -w "%{url_effective}" -o /dev/null "${TEXLIVE_MIRROR}/" | sed 's|/*$||') \
+    &&  TEXLIVE_URL="${TEXLIVE_URL:-$TEXLIVE_MIRROR}" \
+    &&  for i in 1 2 3; do \
+            wget --quiet "${TEXLIVE_URL}/install-tl-unx.tar.gz" \
+            && wget --quiet "${TEXLIVE_URL}/install-tl-unx.tar.gz.sha512" \
+            && wget --quiet "${TEXLIVE_URL}/install-tl-unx.tar.gz.sha512.asc" \
+            && gpg --verify install-tl-unx.tar.gz.sha512.asc \
+            && sha512sum -c install-tl-unx.tar.gz.sha512 \
+            && break; \
+            rm -f install-tl-unx.tar.gz*; \
+            [ "$i" -eq 3 ] && exit 1; \
+            sleep 2; \
+            TEXLIVE_URL=$(curl -4 -fsSL -w "%{url_effective}" -o /dev/null "${TEXLIVE_MIRROR}/" | sed 's|/*$||'); \
+            TEXLIVE_URL="${TEXLIVE_URL:-$TEXLIVE_MIRROR}"; \
+        done \
     &&  tar -xz -C /install-tl-unx --strip-components=1 -f install-tl-unx.tar.gz \
     &&  rm install-tl-unx.tar.gz* \
     &&  echo "tlpdbopt_autobackup 0" >> /install-tl-unx/texlive.profile \
@@ -67,11 +79,16 @@ RUN mkdir /install-tl-unx \
     \
     &&  /install-tl-unx/install-tl \
     -profile /install-tl-unx/texlive.profile \
-    -repository ${TEXLIVE_MIRROR} \
+    -repository ${TEXLIVE_URL} \
     \
     &&  $(find /usr/local/texlive -name tlmgr) path add \
-    &&  (tlmgr install --retry 5 --repository ${TEXLIVE_MIRROR} latexmk texcount synctex etoolbox xetex \
-        || tlmgr install --retry 5 --repository https://mirror.ox.ac.uk/sites/ctan.org/systems/texlive/tlnet latexmk texcount synctex etoolbox xetex) \
+    &&  for i in 1 2 3; do \
+            (tlmgr install --repository ${TEXLIVE_URL} latexmk texcount synctex etoolbox xetex \
+            || tlmgr install --repository https://mirror.ox.ac.uk/sites/ctan.org/systems/texlive/tlnet latexmk texcount synctex etoolbox xetex) \
+            && break; \
+            [ "$i" -eq 3 ] && exit 1; \
+            sleep 2; \
+        done \
     &&  tlmgr path add \
     &&  rm -rf /install-tl-unx
 
